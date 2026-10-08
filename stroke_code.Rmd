@@ -1,0 +1,810 @@
+---
+title: "Predictive Analytics & Machine Learning for Acute Stroke Mortality"
+author: "Beth"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+## 1. Project Overview & Environment Setup
+
+This project develops, evaluates, and compares interpretable machine learning models to predict in-hospital mortality following acute stroke presentation. Using a synthetic clinical dataset incorporating patient demographics, physiological baseline metrics, presenting symptoms, neuroimaging features, and acute treatments, I compare **LASSO Regularized Logistic Regression** against **XGBoost Gradient Boosted Trees**.
+
+### Key Analytical Goals:
+1. Conduct extensive Exploratory Data Analysis (EDA) and non-parametric hypothesis testing.
+2. Address class imbalance via empirical positive-class reweighting.
+3. Optimize hyperparameters via Cross-Validation (Deviance for LASSO; PR-AUC for XGBoost).
+4. Evaluate models using threshold-calibrated clinical metrics (Sensitivity, Specificity, PPV, NPV, ROC-AUC, PR-AUC, Log Loss).
+5. Explain feature contributions using L2-norm grouped coefficients and SHAP (SHapley Additive exPlanations).
+
+```{r load-libraries}
+
+library(tidyverse)      
+library(gtsummary)       
+library(gt)              
+library(ggplot2)         
+library(patchwork)       
+library(scales)          
+library(caret)           
+library(glmnet)          
+library(ggcorrplot)      
+library(pROC)            
+library(PRROC)           
+library(xgboost)         
+library(SHAPforxgboost)  
+
+# Load dataset
+data <- read.csv("assignment2026.csv")
+```
+
+---
+
+## 2. Exploratory Data Analysis (EDA) & Descriptive Statistics
+
+### 2.1 Baseline Dataset Inspection & Data Types
+
+
+
+```{r}
+# Overview of variable distributions and summary statistics
+summary(data)
+# Check for missing values across all columns
+missing_count <- sum(!complete.cases(data))
+cat("Total missing data records:", missing_count, "\n")
+
+# Format primary outcome: Binary Mortality (0 = Survived, 1 = Died)
+data$death <- factor(data$death, 
+                    levels = c(0, 1),
+                    labels = c("Survived", "Died"))
+
+# Convert clinical categorical variables and indicators to factors
+factor_vars <- c("consc", "gender", "wakesym", "atrial", "CT", "Infarc", "hep24", "asp3",
+                 paste0("symptom", 1:8), "subtype", "treat1", "treat2")
+
+
+factor_vars <- intersect(factor_vars, names(data))
+data[factor_vars] <- lapply(data[factor_vars], factor)
+```
+
+```{r descriptive-table1}
+# Generate Table 1 by outcome status
+table1 <- data %>%
+  tbl_summary(
+    by = death,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd}) | {median} ({IQR})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 1
+  ) %>%
+  add_overall() %>%
+  bold_labels()
+
+gt_table1 <- as_gt(table1)
+gt_table1
+```
+
+### 2.2 Analysis of Continuous Predictors
+
+I analysed differences in key continuous clinical measurements—Treatment Delay (hours), Patient Age (years), and Systolic Blood Pressure, between survivors and non-survivors using non-parametric **Wilcoxon Rank-Sum Tests (Mann-Whitney U Tests)** due to skewed distributional shapes.
+
+```{r continuous-eda, fig.width=10, fig.height=8}
+# Boxplot: Hours delay before treatment by outcome
+delay_box <- ggplot(data, aes(x = death, y = delay, fill = death)) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red") +
+  scale_fill_manual(values = c("Survived" = "#2b5c8f", "Died" = "#d95f02")) +
+  labs(title = "Treatment Delay by Outcome", x = "Outcome", y = "Delay (Hours)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Boxplot: Patient Age by outcome
+age_box <- ggplot(data, aes(x = death, y = age, fill = death)) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red") +
+  scale_fill_manual(values = c("Survived" = "#2b5c8f", "Died" = "#d95f02")) +
+  labs(title = "Patient Age Distribution by Outcome", x = "Outcome", y = "Age (Years)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Density Histogram: Age comparison
+age_hist <- ggplot(data) +
+  geom_histogram(aes(x = age, y = after_stat(density), fill = death), bins = 30, alpha = 0.6, position = "identity") + 
+  facet_wrap(~ death) +
+  scale_fill_manual(values = c("Survived" = "turquoise3", "Died" = "coral2")) +
+  labs(title = "Age Density Distribution", x = "Age", y = "Density") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Boxplot: Systolic Blood Pressure (SBP) by outcome
+sbp_box <- ggplot(data, aes(x = death, y = sbp, fill = death)) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red") +
+  scale_fill_manual(values = c("Survived" = "#2b5c8f", "Died" = "#d95f02")) +
+  labs(title = "Systolic Blood Pressure by Outcome", x = "Outcome", y = "SBP (mmHg)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Arrange plots using patchwork
+(delay_box | age_box) / (age_hist | sbp_box)
+
+# Wilcoxon Rank-Sum Statistical Tests
+cat("--- Wilcoxon Rank-Sum Tests ---\n")
+print(wilcox.test(delay ~ death, data = data))
+print(wilcox.test(age ~ death, data = data))
+print(wilcox.test(sbp ~ death, data = data))
+```
+
+### 2.3 Categorical Predictor Analysis & Fisher's Exact Tests
+
+To evaluate bivariate associations between categorical clinical factors and mortality, I performed Monte-Carlo simulated **Fisher's Exact Tests**.
+
+```{r fishers-exact-tests}
+# Compute Fisher's Exact Test p-values for all categorical predictors
+cat_vars <- c("consc", "gender", "wakesym", "atrial", "CT", "Infarc", "hep24", "asp3",
+              paste0("symptom", 1:8), "subtype", "treat1", "treat2")
+cat_vars <- intersect(cat_vars, names(data))
+
+fish_results <- data.frame(
+  variable = cat_vars,
+  p_value = sapply(cat_vars, function(v) {
+    fisher.test(table(data$death, data[[v]]), simulate.p.value = TRUE)$p.value
+  }),
+  stringsAsFactors = FALSE
+)
+
+# Assign statistical significance stars
+fish_results$stars <- cut(
+  fish_results$p_value,
+  breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+  labels = c("***", "**", "*", "ns")
+)
+
+fish_results <- fish_results[order(fish_results$p_value), ]
+
+# Render statistical table
+fish_table <- fish_results %>%
+  gt() %>%
+  tab_header(
+    title = "Bivariate Association with Mortality",
+    subtitle = "Fisher's Exact Test P-values and Significance Levels"
+  ) %>%
+  fmt_scientific(columns = p_value, decimals = 3) %>%
+  cols_label(
+    variable = "Clinical Categorical Predictor",
+    p_value = "P-value",
+    stars = "Significance"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  )
+
+fish_table
+```
+
+### 2.4 Acute Treatment Options & Outcome Proportions
+
+```{r treatment-comparison, fig.width=9, fig.height=6}
+# Visualising outcome distribution across treatment protocols
+p1 <- ggplot(subset(data, death == "Survived"), aes(x = treat1)) +
+  geom_bar(fill = "#2b5c8f") +
+  labs(title = "Treatment 1 (Survivors)", x = "Treatment 1 Code", y = "Count") +
+  theme_minimal()
+
+p2 <- ggplot(subset(data, death == "Died"), aes(x = treat1)) +
+  geom_bar(fill = "#d95f02") +
+  labs(title = "Treatment 1 (Deceased)", x = "Treatment 1 Code", y = "Count") +
+  theme_minimal()
+
+p3 <- ggplot(subset(data, death == "Survived"), aes(x = treat2)) +
+  geom_bar(fill = "#2b5c8f") +
+  labs(title = "Treatment 2 (Survivors)", x = "Treatment 2 Code", y = "Count") +
+  theme_minimal()
+
+p4 <- ggplot(subset(data, death == "Died"), aes(x = treat2)) +
+  geom_bar(fill = "#d95f02") +
+  labs(title = "Treatment 2 (Deceased)", x = "Treatment 2 Code", y = "Count") +
+  theme_minimal()
+
+(p1 | p2) / (p3 | p4)
+```
+
+### 2.5 Pairwise Symptom & Feature Correlation Heatmap
+
+Evaluating collinearity among binary clinical indicators informs penalization choices (e.g., L1 LASSO vs L2 Ridge).
+
+```{r correlation-heatmap, fig.width=8, fig.height=7}
+yn_vars <- c("wakesym", "atrial", "CT", "Infarc", "hep24", "asp3",
+             paste0("symptom", 1:8), "treat2")
+yn_vars <- intersect(yn_vars, names(data))
+
+# Encode factor values to binary 1/0 integers for Pearson correlation
+yn01 <- as.data.frame(lapply(data[yn_vars], function(x) {
+  x_str <- toupper(trimws(as.character(x)))
+  as.integer(x_str == "Y" | x_str == "1" | x_str == "TRUE")
+}))
+
+corr_matrix <- cor(yn01, use = "pairwise.complete.obs")
+
+cat_cor <- ggcorrplot(
+  corr_matrix,
+  method = "square",
+  hc.order = TRUE,
+  type = "lower",
+  lab = FALSE,
+  tl.cex = 9,
+  title = "Correlation Structure of Binary Clinical Indicators"
+)
+
+cat_cor
+```
+
+### 2.6 Mortality Rate by Stroke Subtype
+
+```{r subtype-mortality, fig.width=7, fig.height=4.5}
+death_subtype <- data %>%
+  group_by(subtype) %>%
+  summarise(
+    total = n(),
+    deaths = sum(death == "Died", na.rm = TRUE),
+    death_rate = mean(death == "Died", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = subtype, y = death_rate)) +
+  geom_point(size = 4, color = "firebrick") +
+  geom_line(group = 1, color = "grey40", linetype = "dashed") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Mortality Rate by Stroke Subtype",
+    x = "Stroke Subtype",
+    y = "Observed Mortality Rate (%)"
+  ) +
+  theme_minimal()
+
+death_subtype
+```
+
+---
+
+## 3. Data Splitting & Pre-processing
+
+We partition the dataset into an **80% Training Set** and a **20% Independent Validation/Test Set** using stratified sampling to preserve the mortality outcome proportion.
+
+```{r data-splitting}
+set.seed(22) # Ensure reproducible data partition
+
+train_idx <- createDataPartition(y = data$death, p = 0.8, list = FALSE)
+data_train <- data[train_idx, ]
+data_val   <- data[-train_idx, ]
+
+# Validate balance in mortality rate
+cat("Training set mortality proportion:\n")
+print(prop.table(table(data_train$death)))
+
+cat("Validation set mortality proportion:\n")
+print(prop.table(table(data_val$death)))
+```
+
+---
+
+## 4. Regularized Logistic Regression (LASSO)
+
+### 4.1 Model Matrix Formulation & Empirical Class Reweighting
+
+LASSO ($L_1$ penalty) performs feature selection by shrinking non-informative coefficients to exactly zero. To address outcome imbalance, positive cases are weighted inversely to their sample proportion:
+$$w_{\text{pos}} = \frac{N_{\text{survived}}}{N_{\text{died}}}$$
+
+```{r lasso-preparation}
+# Construct design matrices (one-hot encoding categorical factors)
+x_train <- model.matrix(death ~ ., data_train)[, -1]
+y_train <- data_train$death
+x_test  <- model.matrix(death ~ ., data_val)[, -1]
+y_test  <- data_val$death
+
+# Numeric response vector: 1 = Died, 0 = Survived
+y_train_num <- as.numeric(y_train == "Died")
+y_test_num  <- as.numeric(y_test == "Died")
+
+# Calculate empirical positive class weight for imbalanced learning
+w_pos <- sum(y_train_num == 0) / sum(y_train_num == 1)
+case_weights <- ifelse(y_train_num == 1, w_pos, 1)
+
+cat("Empirical positive class weight:", round(w_pos, 2), "\n")
+```
+
+### 4.2 Cross-Validation for $\lambda$ Hyperparameter Tuning
+
+We execute 10-fold cross-validation (`cv.glmnet`) optimizing binomial log-loss (deviance).
+
+```{r lasso-tuning, fig.width=8, fig.height=5}
+# Fit LASSO coefficient path
+lasso_mod <- glmnet(x_train, y_train_num, alpha = 1, family = "binomial",
+                    weights = case_weights, standardize = TRUE)
+
+plot(lasso_mod, xvar = "lambda", label = TRUE)
+
+# 10-fold Cross-Validation
+set.seed(22)
+lasso_cv <- cv.glmnet(x_train, y_train_num, alpha = 1, nfolds = 10,
+                      weights = case_weights, family = "binomial",
+                      type.measure = "deviance", standardize = TRUE)
+
+plot(lasso_cv)
+
+best_lambda <- lasso_cv$lambda.min
+lambda_1se  <- lasso_cv$lambda.1se
+
+cat("Optimal Lambda (min deviance):", best_lambda, "\n")
+cat("1-SE Lambda (parsimonious):", lambda_1se, "\n")
+
+# Active nonzero variables count
+c_min <- coef(lasso_cv, s = "lambda.min")
+c_1se <- coef(lasso_cv, s = "lambda.1se")
+
+cat("Non-zero features at lambda.min:", sum(c_min[-1] != 0), "\n")
+cat("Non-zero features at lambda.1se:", sum(c_1se[-1] != 0), "\n")
+```
+
+### 4.3 Refitting Final LASSO Model & Validation Evaluation
+
+```{r lasso-evaluation, fig.width=9, fig.height=4.5}
+# Refit model at optimal lambda.min
+lasso_final <- glmnet(x_train, y_train_num, alpha = 1, family = "binomial",
+                      lambda = best_lambda, weights = case_weights, standardize = TRUE)
+
+# Predict probabilities on Train and Test sets
+ypred_train <- as.numeric(predict(lasso_final, newx = x_train, type = "response"))
+ypred_test  <- as.numeric(predict(lasso_final, newx = x_test,  type = "response"))
+
+# ROC-AUC evaluation
+roc_train_lasso <- roc(y_train_num, ypred_train, quiet = TRUE)
+roc_test_lasso  <- roc(y_test_num,  ypred_test,  quiet = TRUE)
+
+# PR-AUC evaluation
+pr_test_lasso  <- pr.curve(scores.class0 = ypred_test[y_test_num == 1],
+                           scores.class1 = ypred_test[y_test_num == 0], curve = TRUE)
+pr_train_lasso <- pr.curve(scores.class0 = ypred_train[y_train_num == 1],
+                           scores.class1 = ypred_train[y_train_num == 0], curve = FALSE)
+
+cat("LASSO Test ROC-AUC:", round(auc(roc_test_lasso), 3), "\n")
+cat("LASSO Test PR-AUC:", round(pr_test_lasso$auc.integral, 3), "\n")
+
+# Display LASSO ROC and PR Curves on Test Data
+par(mfrow = c(1, 2))
+plot(roc_test_lasso, col = "#2C7FB8", lwd = 3, main = "LASSO ROC Curve (Test)")
+plot(pr_test_lasso, col = "chocolate", lwd = 3, main = "LASSO Precision-Recall Curve (Test)")
+par(mfrow = c(1, 1))
+
+# Optimal decision threshold set for clinical sensitivity target (>= 80%)
+threshold_lasso <- 0.395
+ypred_train_class <- ifelse(ypred_train >= threshold_lasso, 1, 0)
+ypred_test_class  <- ifelse(ypred_test  >= threshold_lasso, 1, 0)
+
+cm_train_lasso <- confusionMatrix(table(factor(ypred_train_class, levels=c(0,1)), factor(y_train_num, levels=c(0,1))), positive = "1")
+cm_test_lasso  <- confusionMatrix(table(factor(ypred_test_class, levels=c(0,1)), factor(y_test_num, levels=c(0,1))), positive = "1")
+
+# Format metrics table
+lasso_metrics <- data.frame(
+  Metric = c("Sensitivity", "Specificity", "PPV", "NPV", "Balanced Accuracy", "Accuracy", "AUC", "AUC-PR"),
+  Training = round(c(cm_train_lasso$byClass["Sensitivity"], cm_train_lasso$byClass["Specificity"],
+                     cm_train_lasso$byClass["Pos Pred Value"], cm_train_lasso$byClass["Neg Pred Value"],
+                     cm_train_lasso$byClass["Balanced Accuracy"], cm_train_lasso$overall["Accuracy"],
+                     as.numeric(auc(roc_train_lasso)), pr_train_lasso$auc.integral), 2),
+  Test = round(c(cm_test_lasso$byClass["Sensitivity"], cm_test_lasso$byClass["Specificity"],
+                 cm_test_lasso$byClass["Pos Pred Value"], cm_test_lasso$byClass["Neg Pred Value"],
+                 cm_test_lasso$byClass["Balanced Accuracy"], cm_test_lasso$overall["Accuracy"],
+                 as.numeric(auc(roc_test_lasso)), pr_test_lasso$auc.integral), 2)
+)
+
+lasso_metrics %>% gt() %>% tab_header(title = "LASSO (Lambda Min) Model Performance Metrics", subtitle = "Optimal Deviance Model (Threshold = 0.395)")
+
+# --- Additional Evaluation: LASSO with Lambda 1-SE (Parsimonious Model) ---
+lasso_1se_final <- glmnet(x_train, y_train_num, alpha = 1, family = "binomial",
+                          lambda = lambda_1se, weights = case_weights, standardize = TRUE)
+ypred_train_1se <- as.numeric(predict(lasso_1se_final, newx = x_train, type = "response"))
+ypred_test_1se  <- as.numeric(predict(lasso_1se_final, newx = x_test,  type = "response"))
+
+roc_train_1se <- roc(y_train_num, ypred_train_1se, quiet = TRUE)
+roc_test_1se  <- roc(y_test_num,  ypred_test_1se,  quiet = TRUE)
+
+pr_test_1se_eval  <- pr.curve(scores.class0 = ypred_test_1se[y_test_num == 1],
+                              scores.class1 = ypred_test_1se[y_test_num == 0], curve = FALSE)
+pr_train_1se_eval <- pr.curve(scores.class0 = ypred_train_1se[y_train_num == 1],
+                              scores.class1 = ypred_train_1se[y_train_num == 0], curve = FALSE)
+
+ypred_train_class_1se <- ifelse(ypred_train_1se >= threshold_lasso, 1, 0)
+ypred_test_class_1se  <- ifelse(ypred_test_1se  >= threshold_lasso, 1, 0)
+
+cm_train_1se <- confusionMatrix(table(factor(ypred_train_class_1se, levels=c(0,1)), factor(y_train_num, levels=c(0,1))), positive = "1")
+cm_test_1se  <- confusionMatrix(table(factor(ypred_test_class_1se,  levels=c(0,1)), factor(y_test_num,  levels=c(0,1))), positive = "1")
+
+lasso_1se_metrics <- data.frame(
+  Metric = c("Sensitivity", "Specificity", "PPV", "NPV", "Balanced Accuracy", "Accuracy", "AUC", "AUC-PR"),
+  Training = round(c(cm_train_1se$byClass["Sensitivity"], cm_train_1se$byClass["Specificity"],
+                     cm_train_1se$byClass["Pos Pred Value"], cm_train_1se$byClass["Neg Pred Value"],
+                     cm_train_1se$byClass["Balanced Accuracy"], cm_train_1se$overall["Accuracy"],
+                     as.numeric(auc(roc_train_1se)), pr_train_1se_eval$auc.integral), 2),
+  Test = round(c(cm_test_1se$byClass["Sensitivity"], cm_test_1se$byClass["Specificity"],
+                 cm_test_1se$byClass["Pos Pred Value"], cm_test_1se$byClass["Neg Pred Value"],
+                 cm_test_1se$byClass["Balanced Accuracy"], cm_test_1se$overall["Accuracy"],
+                 as.numeric(auc(roc_test_1se)), pr_test_1se_eval$auc.integral), 2)
+)
+
+lasso_1se_metrics %>% gt() %>% tab_header(title = "LASSO (Lambda 1-SE) Model Performance Metrics", subtitle = "Parsimonious Regularization Model (Threshold = 0.395)")
+```
+
+### 4.4 LASSO Feature Importance: Lambda min vs. Lambda 1se (With and Without Dummy Variables)
+
+I analysed feature importance under both:
+1. **$\lambda_{\min}$**: Minimises cross-validated deviance (retains more predictors).
+2. **$\lambda_{1\text{se}}$**: Most parsimonious model within 1 standard error of the minimum deviance (stricter penalty, fewer non-zero predictors).
+
+For each $\lambda$, I examined:
+- **Individual level coefficients (including dummy variables)** to see specific category effects and direction of log-odds.
+- **Aggregated variable importance (excluding dummies)** using the $L_2$ norm ($\sqrt{\sum \beta^2}$) across grouped levels (e.g., combining all stroke subtypes or consciousness categories).
+
+#### (a) Feature Importance at $\lambda_{\min}$
+
+```{r lasso-importance-lambda-min, fig.width=10, fig.height=4.5}
+# --- 1. Lambda min: Individual features (including dummy variables) ---
+coef_lasso_min <- coef(lasso_cv, s = "lambda.min") 
+coef_df_min <- data.frame(
+  variable = rownames(coef_lasso_min),
+  beta = as.numeric(coef_lasso_min)
+) %>%
+  subset(variable != "(Intercept)" & beta != 0) %>%
+  transform(
+    abs_beta = abs(beta),
+    odds_ratio = exp(beta)
+  ) %>%
+  arrange(desc(abs_beta))
+
+p_imp_min_dum <- ggplot(head(coef_df_min, 10), aes(x = reorder(variable, abs_beta), y = beta)) +
+  geom_col(fill = "deepskyblue4") +
+  coord_flip() +
+  labs(
+    x = "Feature (including dummy indicators)",
+    y = "Lasso Coefficient (Log-Odds)",
+    title = expression(paste("Variable Importance (inc. dummies) at ", lambda[min]))
+  ) +
+  theme_minimal()
+
+# --- 2. Lambda min: Aggregated variables without dummies (L2 norm) ---
+mm <- model.matrix(death ~ ., data = data_train)
+var_x <- mm[, -1, drop = FALSE]
+bmat_min <- as.matrix(coef(lasso_cv, s = "lambda.min"))
+beta_var_min <- bmat_min[-1, 1]
+
+group_id <- attr(mm, "assign")[-1]
+term_labels <- attr(terms(death ~ ., data = data_train), "term.labels")
+group_nm <- term_labels[group_id]
+
+beta_var_min <- beta_var_min[colnames(var_x)]
+imp_lasso_min <- tapply(beta_var_min, group_nm, function(z) sqrt(sum(z^2)))
+
+imp_df_min <- data.frame(
+  variable = names(imp_lasso_min),
+  importance = as.numeric(imp_lasso_min)
+) %>%
+  arrange(desc(importance))
+
+p_imp_min_group <- ggplot(head(imp_df_min, 10), aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "deepskyblue3") +
+  coord_flip() +
+  labs(
+    x = "Clinical Variable (Aggregated)",
+    y = expression(paste("Importance (", L[2], " norm)")),
+    title = expression(paste("Variable Importance (grouped) at ", lambda[min]))
+  ) +
+  theme_minimal()
+
+# Display side-by-side using patchwork
+p_imp_min_dum | p_imp_min_group
+```
+
+#### (b) Feature Importance at $\lambda_{1\text{se}}$ (Parsimonious Model)
+
+```{r lasso-importance-lambda-1se, fig.width=10, fig.height=4.5}
+# --- 3. Lambda 1se: Individual features (including dummy variables) ---
+coef_lasso_1se <- coef(lasso_cv, s = "lambda.1se") 
+coef_df_1se <- data.frame(
+  variable = rownames(coef_lasso_1se),
+  beta = as.numeric(coef_lasso_1se)
+) %>%
+  subset(variable != "(Intercept)" & beta != 0) %>%
+  transform(
+    abs_beta = abs(beta),
+    odds_ratio = exp(beta)
+  ) %>%
+  arrange(desc(abs_beta))
+
+p_imp_1se_dum <- ggplot(head(coef_df_1se, 10), aes(x = reorder(variable, abs_beta), y = beta)) +
+  geom_col(fill = "deeppink4") +
+  coord_flip() +
+  labs(
+    x = "Feature (including dummy indicators)",
+    y = "Lasso Coefficient (Log-Odds)",
+    title = expression(paste("Variable Importance (inc. dummies) at ", lambda["1se"]))
+  ) +
+  theme_minimal()
+
+# --- 4. Lambda 1se: Aggregated variables without dummies (L2 norm) ---
+bmat_1se <- as.matrix(coef(lasso_cv, s = "lambda.1se"))
+beta_var_1se <- bmat_1se[-1, 1]
+beta_var_1se <- beta_var_1se[colnames(var_x)]
+
+imp_lasso_1se <- tapply(beta_var_1se, group_nm, function(z) sqrt(sum(z^2)))
+
+imp_df_1se <- data.frame(
+  variable = names(imp_lasso_1se),
+  importance = as.numeric(imp_lasso_1se)
+) %>%
+  arrange(desc(importance))
+
+p_imp_1se_group <- ggplot(head(imp_df_1se, 10), aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "deeppink3") +
+  coord_flip() +
+  labs(
+    x = "Clinical Variable (Aggregated)",
+    y = expression(paste("Importance (", L[2], " norm)")),
+    title = expression(paste("Variable Importance (grouped) at ", lambda["1se"]))
+  ) +
+  theme_minimal()
+
+# Display side-by-side using patchwork
+p_imp_1se_dum | p_imp_1se_group
+
+# Retain imp_lasso_df for downstream model comparison
+imp_lasso_df <- imp_df_min
+```
+
+---
+
+## 5. Tree-Based Machine Learning: XGBoost
+
+### 5.1 Hyperparameter Grid Tuning with 5-Fold Cross-Validation
+
+We tune `max_depth`, `min_child_weight`, `eta` (learning rate), and `colsample_bytree` using 5-fold CV to maximize **PR-AUC**.
+
+```{r xgboost-grid-tuning, fig.width=10, fig.height=6}
+mat_train <- xgb.DMatrix(x_train, label = y_train_num)
+mat_test  <- xgb.DMatrix(x_test,  label = y_test_num)
+
+# Grid of hyperparameter combinations
+tuning_grid <- expand.grid(
+  max_depth = c(1, 2, 3, 4),
+  min_child_weight = c(5, 10, 15, 20),
+  eta = c(0.01, 0.05, 0.1),
+  colsample_bytree = c(0.4, 0.6, 0.8)
+)
+
+tuning_grid$best_iter <- NA_integer_
+tuning_grid$aucpr <- NA_real_
+
+set.seed(22)
+for (g in seq_len(nrow(tuning_grid))) {
+  params <- list(
+    objective = "binary:logistic",
+    eval_metric = "aucpr",
+    eta = tuning_grid$eta[g],
+    subsample = 0.7,
+    tree_method = "hist",
+    colsample_bytree = tuning_grid$colsample_bytree[g],
+    scale_pos_weight = w_pos,
+    max_depth = tuning_grid$max_depth[g],
+    min_child_weight = tuning_grid$min_child_weight[g]
+  )
+  
+  cv_tuned <- xgb.cv(
+    params = params,
+    data = mat_train,
+    nrounds = 1000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 40,
+    maximize = TRUE,
+    verbose = 0
+  )
+  
+  vals <- cv_tuned$evaluation_log$test_aucpr_mean
+  best_it <- which.max(vals)
+  
+  tuning_grid$best_iter[g] <- best_it
+  tuning_grid$aucpr[g]     <- vals[best_it]
+}
+
+# Select optimal hyperparameter set
+best_params_xgb <- tuning_grid[which.max(tuning_grid$aucpr), ]
+cat("Best XGBoost Hyperparameters:\n")
+print(best_params_xgb)
+
+# Visualise Hyperparamete heastmap
+ggplot(tuning_grid, aes(x = factor(max_depth), y = factor(min_child_weight), fill = aucpr)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "cadetblue4") +
+  facet_grid(eta ~ colsample_bytree, labeller = label_both) +
+  labs(title = "XGBoost Hyperparameter Tuning Grid (PR-AUC)", x = "Max Depth", y = "Min Child Weight") +
+  theme_minimal()
+```
+
+### 5.2 Refitting Final XGBoost Model & Evaluation
+
+```{r xgboost-final-fit, fig.width=9, fig.height=4.5}
+final_xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "aucpr",
+  tree_method = "hist",
+  subsample = 0.7,
+  colsample_bytree = best_params_xgb$colsample_bytree,
+  min_child_weight = best_params_xgb$min_child_weight,
+  max_depth = best_params_xgb$max_depth,
+  eta = best_params_xgb$eta,
+  scale_pos_weight = w_pos
+)
+
+set.seed(22)
+xgb_final <- xgb.train(
+  params = final_xgb_params,
+  data = mat_train,
+  nrounds = best_params_xgb$best_iter,
+  verbose = 0
+)
+
+# Predict probabilities
+pred_xgb_train <- predict(xgb_final, mat_train)
+pred_xgb_test  <- predict(xgb_final, mat_test)
+
+# Evaluate ROC & PR curves
+roc_train_xgb <- roc(y_train_num, pred_xgb_train, quiet = TRUE)
+roc_test_xgb  <- roc(y_test_num,  pred_xgb_test,  quiet = TRUE)
+
+pr_train_xgb <- pr.curve(scores.class0 = pred_xgb_train[y_train_num == 1], scores.class1 = pred_xgb_train[y_train_num == 0], curve = TRUE)
+pr_test_xgb  <- pr.curve(scores.class0 = pred_xgb_test[y_test_num == 1],   scores.class1 = pred_xgb_test[y_test_num == 0],   curve = TRUE)
+
+# Display XGBoost ROC and PR Curves on Test Data
+par(mfrow = c(1, 2))
+plot(roc_test_xgb, col = "brown4", lwd = 3, main = "XGBoost ROC Curve (Test)")
+plot(pr_test_xgb, col = "darkseagreen", lwd = 3, main = "XGBoost Precision-Recall Curve (Test)")
+par(mfrow = c(1, 1))
+
+# Calibrated classification threshold
+threshold_xgb <- 0.380
+yhat_train_xgb <- ifelse(pred_xgb_train >= threshold_xgb, 1, 0)
+yhat_test_xgb  <- ifelse(pred_xgb_test  >= threshold_xgb, 1, 0)
+
+cm_train_xgb <- confusionMatrix(table(factor(yhat_train_xgb, levels=c(0,1)), factor(y_train_num, levels=c(0,1))), positive = "1")
+cm_test_xgb  <- confusionMatrix(table(factor(yhat_test_xgb,  levels=c(0,1)), factor(y_test_num,  levels=c(0,1))), positive = "1")
+
+xgb_metrics <- data.frame(
+  Metric = c("Sensitivity", "Specificity", "PPV", "NPV", "Balanced Accuracy", "Accuracy", "AUC", "AUC-PR"),
+  Training = round(c(cm_train_xgb$byClass["Sensitivity"], cm_train_xgb$byClass["Specificity"],
+                     cm_train_xgb$byClass["Pos Pred Value"], cm_train_xgb$byClass["Neg Pred Value"],
+                     cm_train_xgb$byClass["Balanced Accuracy"], cm_train_xgb$overall["Accuracy"],
+                     as.numeric(auc(roc_train_xgb)), pr_train_xgb$auc.integral), 2),
+  Test = round(c(cm_test_xgb$byClass["Sensitivity"], cm_test_xgb$byClass["Specificity"],
+                 cm_test_xgb$byClass["Pos Pred Value"], cm_test_xgb$byClass["Neg Pred Value"],
+                 cm_test_xgb$byClass["Balanced Accuracy"], cm_test_xgb$overall["Accuracy"],
+                 as.numeric(auc(roc_test_xgb)), pr_test_xgb$auc.integral), 2)
+)
+
+xgb_metrics %>% gt() %>% tab_header(title = "XGBoost Model Performance Metrics", subtitle = paste0("Decision Threshold = ", threshold_xgb))
+
+# --- XGBoost Confusion Matrix Table: Train vs. Test ---
+cm_xgb_combined <- data.frame(
+  Prediction = c("Predicted Survived (0)", "Predicted Survived (0)", "Predicted Died (1)", "Predicted Died (1)"),
+  Observed   = c("Actual Survived (0)", "Actual Died (1)", "Actual Survived (0)", "Actual Died (1)"),
+  Classification = c("True Negative (TN)", "False Negative (FN)", "False Positive (FP)", "True Positive (TP)"),
+  Training_Count = c(
+    cm_train_xgb$table[1, 1], # Pred 0, Obs 0
+    cm_train_xgb$table[1, 2], # Pred 0, Obs 1
+    cm_train_xgb$table[2, 1], # Pred 1, Obs 0
+    cm_train_xgb$table[2, 2]  # Pred 1, Obs 1
+  ),
+  Test_Count = c(
+    cm_test_xgb$table[1, 1],
+    cm_test_xgb$table[1, 2],
+    cm_test_xgb$table[2, 1],
+    cm_test_xgb$table[2, 2]
+  )
+)
+
+cm_xgb_gt <- cm_xgb_combined %>%
+  gt() %>%
+  tab_header(
+    title = "XGBoost Confusion Matrix Counts",
+    subtitle = paste0("Training vs. Test Set Comparison (Threshold = ", threshold_xgb, ")")
+  ) %>%
+  cols_label(
+    Prediction = "Model Prediction",
+    Observed = "Actual Outcome",
+    Classification = "Classification Type",
+    Training_Count = "Training Set (N)",
+    Test_Count = "Test Set (N)"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  )
+
+cm_xgb_gt
+```
+
+### 5.3 SHAP (SHapley Additive exPlanations) Model Interpretability
+
+```{r xgboost-shap, fig.width=9, fig.height=5}
+# Calculate SHAP values on validation set
+shap_plot <- shap.plot.summary.wrap1(xgb_final, X = as.matrix(x_test), top_n = 15)
+shap_plot
+```
+
+---
+
+## 6. Model Comparison & Synthesis
+
+### 6.1 Log Loss (Binary Cross-Entropy) Benchmarking
+
+$$\text{Log Loss} = -\frac{1}{N} \sum_{i=1}^N \left[ y_i \log(p_i) + (1-y_i) \log(1-p_i) \right]$$
+
+```{r logloss-comparison}
+calc_logloss <- function(y, p, eps = 1e-15) {
+  p <- pmin(pmax(p, eps), 1 - eps)
+  -mean(y * log(p) + (1 - y) * log(1 - p))
+}
+
+logloss_summary <- data.frame(
+  Model = c("LASSO Regularized Regression", "XGBoost Gradient Boosting"),
+  Train_LogLoss = round(c(calc_logloss(y_train_num, ypred_train), calc_logloss(y_train_num, pred_xgb_train)), 4),
+  Test_LogLoss  = round(c(calc_logloss(y_test_num,  ypred_test),  calc_logloss(y_test_num,  pred_xgb_test)), 4)
+)
+
+logloss_summary %>% gt(rowname_col = "Model") %>% tab_header(title = "Log Loss Comparison")
+```
+
+### 6.2 Feature Importance Comparison Across Models
+
+I normalise importance metrics ($[0, 1]$ scale) to directly compare LASSO coefficient magnitudes against XGBoost Gain.
+
+```{r feature-importance-comparison, fig.width=9, fig.height=6}
+# Aggregate XGBoost Gain back to original variable groups
+col_to_var <- data.frame(
+  Feature = colnames(mm[, -1, drop = FALSE]),
+  variable = term_labels[group_id],
+  stringsAsFactors = FALSE
+)
+
+var_imp_xgb <- xgb.importance(feature_names = colnames(x_train), model = xgb_final)
+vars_xgb <- var_imp_xgb %>%
+  left_join(col_to_var, by = "Feature") %>%
+  group_by(variable) %>%
+  summarise(Gain = sum(Gain), .groups = "drop")
+
+# Merge importance scores
+comp_imp <- merge(imp_lasso_df, vars_xgb, by = "variable", all = TRUE) %>%
+  mutate(
+    importance = replace_na(importance, 0),
+    Gain       = replace_na(Gain, 0),
+    lasso_norm = if (max(importance) > 0) importance / max(importance) else 0,
+    xgb_norm   = if (max(Gain) > 0) Gain / max(Gain) else 0,
+    combined_score = (lasso_norm + xgb_norm) / 2
+  ) %>%
+  slice_max(combined_score, n = 15) %>%
+  arrange(combined_score) %>%
+  mutate(variable = factor(variable, levels = variable)) %>%
+  select(variable, LASSO = lasso_norm, XGBoost = xgb_norm) %>%
+  pivot_longer(-variable, names_to = "Model", values_to = "Normalized_Importance")
+
+ggplot(comp_imp, aes(x = variable, y = Normalized_Importance, fill = Model)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = c("LASSO" = "#2C7FB8", "XGBoost" = "#F03B20")) +
+  labs(
+    title = "Top 15 Feature Importance Comparison across Models",
+    subtitle = "Relative importance scaled 0–100% per model",
+    x = "Clinical Predictor",
+    y = "Normalized Importance"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
