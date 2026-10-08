@@ -1,9 +1,7 @@
 # Acute Stroke Mortality Risk Prediction: Machine Learning Benchmark & Clinical Data Science
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![R 4.5+](https://img.shields.io/badge/R-4.5%2B-blue.svg)](https://www.r-project.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-Enabled-orange.svg)](https://xgboost.readthedocs.io/)
-[![scikit-learn](https://img.shields.io/badge/scikit--learn-ML-green.svg)](https://scikit-learn.org/)
 [![SHAP](https://img.shields.io/badge/SHAP-Interpretability-red.svg)](https://shap.readthedocs.io/)
 
 ---
@@ -12,7 +10,7 @@
 
 This repository presents an end-to-end clinical machine learning project predicting in-hospital mortality risk following acute stroke presentation. Using a synthetic clinical dataset incorporating patient demographics, physiological baseline metrics, presenting symptoms, neuroimaging findings, and acute treatment regimens, this project benchmarks **Parametric Regularized Logistic Regression (LASSO)** against **Non-Linear Tree Ensemble Boosting (XGBoost)**.
 
-The project is fully implemented in both **R (R Markdown)** and **Python (Script & Jupyter Notebook)** to showcase multi-language proficiency in health data science and predictive analytics.
+The project is fully implemented in **R (R Markdown)**
 
 ---
 
@@ -61,11 +59,7 @@ Both LASSO and XGBoost demonstrated strong predictive capacity on the independen
 
 ```gfm
 .
-├── BM_assessment_cleaned.Rmd     # Fully annotated R Markdown analysis notebook
-├── assessment_analysis.R         # Standalone R script pipeline
-├── assessment_analysis.py        # Modular Python script execution pipeline
-├── assessment_analysis.ipynb     # Interactive Jupyter Notebook (Python)
-├── assignment2026.csv            # Synthetic acute stroke clinical dataset
+├── stroke_code.Rmd     # Fully annotated R Markdown analysis notebook
 ├── README.md                     # Project documentation & recruiter guide
 └── figures/                      # Generated visualization artifacts
     ├── eda_continuous_plots.png
@@ -77,29 +71,9 @@ Both LASSO and XGBoost demonstrated strong predictive capacity on the independen
 
 ---
 
-## 🚀 How to Run
+## 🚀 How to Run in R Environment
 
-### Python Environment
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-username/stroke-mortality-prediction.git
-   cd stroke-mortality-prediction
-   ```
-2. Install required packages:
-   ```bash
-   pip install pandas numpy scipy scikit-learn xgboost shap matplotlib seaborn
-   ```
-3. Run the automated script:
-   ```bash
-   python assessment_analysis.py
-   ```
-   Or launch Jupyter Notebook:
-   ```bash
-   jupyter notebook assessment_analysis.ipynb
-   ```
-
-### R Environment
-1. Open `BM_assessment_cleaned.Rmd` in RStudio.
+1. Open `stroke_code.Rmd` in RStudio.
 2. Install required packages in R:
    ```r
    install.packages(c("tidyverse", "gtsummary", "gt", "caret", "glmnet", 
@@ -112,8 +86,8 @@ Both LASSO and XGBoost demonstrated strong predictive capacity on the independen
 
 ## 💡 Tech Stack & Skills Highlighted
 
-- **Data Science Languages**: Python (pandas, NumPy, SciPy) & R (tidyverse, dplyr, ggplot2)
-- **Machine Learning**: `scikit-learn`, `xgboost`, `glmnet`, `caret`, Hyperparameter Grid Search, Cross-Validation
+- **Data Science Languages**: R (tidyverse, dplyr, ggplot2)
+- **Machine Learning**: `xgboost`, `glmnet`, `caret`, Hyperparameter Grid Search, Cross-Validation
 - **Statistical Inference**: Wilcoxon Rank-Sum Tests, Fisher's Exact Tests, Chi-Square Tests
 - **Model Explainability**: SHAP (SHapley Additive exPlanations), Grouped Feature L2 Norms
 - **Clinical Evaluation**: Sensitivity/Specificity Calibration, ROC-AUC, PR-AUC, Log Loss Benchmarking
