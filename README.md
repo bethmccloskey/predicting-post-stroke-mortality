@@ -60,13 +60,8 @@ Both LASSO and XGBoost demonstrated strong predictive capacity on the independen
 ```gfm
 .
 ├── stroke_code.Rmd     # Fully annotated R Markdown analysis notebook
-├── README.md                     # Project documentation & recruiter guide
-└── figures/                      # Generated visualization artifacts
-    ├── eda_continuous_plots.png
-    ├── correlation_heatmap.png
-    ├── subtype_mortality_plot.png
-    ├── shap_summary_plot.png
-    └── model_feature_importance_comparison.png
+├── README.md    # Project documentation
+└── stroke_code.html      # Final report with code
 ```
 
 ---
