@@ -20,7 +20,7 @@ This project develops, evaluates, and compares interpretable machine learning mo
 4. Evaluate models using threshold-calibrated clinical metrics (Sensitivity, Specificity, PPV, NPV, ROC-AUC, PR-AUC, Log Loss).
 5. Explain feature contributions using L2-norm grouped coefficients and SHAP (SHapley Additive exPlanations).
 
-```{r load-libraries}
+```{r setup, message=FALSE, warning=FALSE}
 
 library(tidyverse)      
 library(gtsummary)       
